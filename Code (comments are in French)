@@ -1,0 +1,672 @@
+#include <Grapic.h> // bibliothèque graphique pour afficher des choses à l'écran
+#include <math.h> // pour utiliser des fonctions math (sin, cos, sqrt...)
+#include <stdlib.h> // pour fonctions générales (random, etc.)
+
+using namespace grapic; // permet d'utiliser les fonctions de Grapic sans écrire grapic:: devant
+
+const int DIMX = 950; // largeur de la fenêtre
+const int DIMY = 600; // hauteur de la fenêtre
+const int GAME_ZONE = 700; // zone de jeu (le reste sert pour l'interface)
+const float DT = 0.016f; // pas de temps (≈ 60 images par seconde)
+const int NB_ETOILES = 150; // nombre d'étoiles en fond
+const float GRAVITE = 200.0f; // force de gravité appliquée à la balle
+const float FRICTION_AIR = 0.99f; // ralentissement dans l'air
+const float REBOND_SOL = -0.5f; // rebond quand la balle touche le sol (négatif = repart vers le haut)
+const float FRICTION_SOL = 0.9f; // frottement au sol (ralentit la balle)
+const float RAIDEUR_RAPPEL = 2.0f; // "force du ressort" du lanceur
+const float AMORTI_RAPPEL = 0.95f; // amortissement du lanceur (évite oscillations infinies)
+const int HIST_SIZE = 100; // taille de l'historique (pour graphes)
+const float VMAX_GRAPH = 1500.0f; // vitesse max affichée sur le graphique
+const int UI_X = GAME_ZONE + 25; // position X de l'interface à droite
+const int NB_CIBLES = 6; // nombre de cibles
+const int MAX_PARTICULES = 100; // nombre max de particules (effets visuels)
+const int NB_ASTEROIDES = 2; // nombre d'astéroïdes
+
+struct Vec2 {
+float x, y; // coordonnées x et y (position ou vitesse)
+};
+
+struct Balle {
+Vec2 pos, vit; // position et vitesse de la balle
+float rayon; // taille de la balle
+};
+
+struct Lanceur {
+Vec2 attache; // point fixe du lanceur (là où est attachée la balle)
+};
+
+struct Cible {
+Vec2 pos; // position de la cible
+float vx; // vitesse horizontale
+float rayon; // taille de la cible
+bool active; // true = encore vivante, false = détruite
+};
+
+struct Etoile {
+Vec2 pos; // position de l'étoile
+float taille; // taille de l'étoile
+};
+
+struct Particule {
+Vec2 pos, vit; // position et vitesse (effet visuel)
+float vie; // durée de vie restante
+bool active; // si la particule est utilisée ou non
+};
+
+struct Asteroide {
+int cibleProtegee; // index de la cible protégée
+float angle; // position en angle autour de la cible
+float vitAngulaire; // vitesse de rotation autour de la cible
+float rayonOrbite; // distance entre l'astéroïde et la cible
+float rayon; // taille de l'astéroïde
+};
+
+struct Monde {
+Balle b; // la balle principale
+Lanceur r; // le lanceur
+Cible cibles[NB_CIBLES]; // tableau de toutes les cibles
+Etoile fond_espace[NB_ETOILES]; // étoiles en arrière-plan
+
+float alt_hist[HIST_SIZE]; // historique des altitudes (pour affichage)
+float vit_hist[HIST_SIZE]; // historique des vitesses
+int hist_ptr; // position actuelle dans l'historique
+
+int score; // score du joueur
+
+bool estLancee; // indique si la balle a été lancée
+bool etaitAppuye; // état précédent du clic souris (utile pour détecter un clic)
+
+Particule particules[MAX_PARTICULES]; // effets visuels (explosions, etc.)
+Asteroide asteroides[NB_ASTEROIDES]; // astéroïdes en jeu
+
+float vitMax; // vitesse maximale atteinte par la balle
+int record; // meilleur score enregistré
+
+bool victoire; // true si le joueur a gagné
+float tempsActuel; // temps actuel de la partie
+float meilleurTemps; // meilleur temps réalisé
+};
+void creerExplosion(Monde &m, Vec2 pos) {
+    int creees = 0; // compteur de particules créées
+
+    for(int i = 0; i < MAX_PARTICULES && creees < 40; i++) { // on parcourt les particules (max 40 créées)
+        if(!m.particules[i].active) { // si la particule est libre (non utilisée)
+
+            m.particules[i].pos = pos; // position = point d'explosion
+
+            float angle = (rand() % 360) * M_PI / 180.0f; // angle aléatoire en radians
+            float force = (rand() % 200) + 50.0f; // force aléatoire (vitesse)
+
+            // calcul de la vitesse avec cos/sin pour partir dans toutes les directions
+            m.particules[i].vit = { cos(angle) * force, sin(angle) * force };
+
+            m.particules[i].vie = 1.0f; // durée de vie initiale
+            m.particules[i].active = true; // on active la particule
+
+            creees++; // on augmente le compteur
+        }
+    }
+}
+
+void init(Monde &m) {
+
+    srand(123); // initialise le générateur aléatoire (toujours pareil ici)
+
+    // création des étoiles de fond
+    for(int i = 0; i < NB_ETOILES; i++) {
+        m.fond_espace[i].pos = {
+            (float)(rand() % GAME_ZONE), // position X aléatoire
+            (float)(rand() % DIMY)       // position Y aléatoire
+        };
+
+        m.fond_espace[i].taille = 0.5f + (float)(rand() % 15) / 10.0f; // taille aléatoire
+    }
+
+    m.r.attache = {100, 150}; // position du lanceur
+
+    m.b.pos = m.r.attache;    // la balle commence au lanceur
+    m.b.vit = {0, 0};         // vitesse initiale nulle
+    m.b.rayon = 5.0f;         // taille de la balle
+
+    m.score = 0;              // score initial
+    m.estLancee = false;      // la balle n'est pas encore lancée
+    m.etaitAppuye = false;    // clic souris initial
+
+    m.hist_ptr = 0;           // position de départ dans l'historique
+    m.vitMax = 0.0f;          // vitesse max initiale
+
+    m.victoire = false;       // pas encore gagné
+    m.tempsActuel = 0.0f;     // temps initial
+
+    // remise à zéro des historiques
+    for(int i=0; i<HIST_SIZE; i++) {
+        m.alt_hist[i] = 0;
+        m.vit_hist[i] = 0;
+    }
+
+    // désactivation de toutes les particules
+    for(int i = 0; i < MAX_PARTICULES; i++)
+        m.particules[i].active = false;
+
+    // initialisation des cibles (position, vitesse, taille, active)
+    m.cibles[0] = {{400, 450},  80.0f,  6,  true};
+    m.cibles[1] = {{550, 300}, -110.0f, 10, true};
+    m.cibles[2] = {{600, 500},  60.0f,  8,  true};
+    m.cibles[3] = {{450, 150},  95.0f,  12, true};
+    m.cibles[4] = {{520, 580}, -75.0f,  14, true};
+    m.cibles[5] = {{380, 380}, 140.0f,  2,  true};
+
+    // initialisation des astéroïdes (cible protégée, angle, vitesse, distance, taille)
+    m.asteroides[0] = {1, 0.0f,   0.8f, 45.0f, 8.0f};
+    m.asteroides[1] = {3, 3.14f, -1.0f, 40.0f, 7.0f};
+}
+void update(Monde &m) {
+
+    if (m.victoire) return; // si le joueur a gagné, on arrête la mise à jour
+
+    bool appuye = isMousePressed(SDL_BUTTON_LEFT); // vérifie si clic gauche enfoncé
+
+    int mx, my;
+    mousePos(mx, my); // récupère position souris
+
+    // === PHASE DE VISÉE ===
+    if (appuye && mx < GAME_ZONE) { // si on clique dans la zone de jeu
+        m.estLancee = false; // la balle n'est pas encore lancée
+
+        float dx = mx - m.r.attache.x, dy = my - m.r.attache.y; // distance entre souris et lanceur
+        float dist = sqrt(dx*dx + dy*dy); // longueur du vecteur
+
+        if (dist > 150.0f) { // limite de distance (élastique max)
+            m.b.pos.x = m.r.attache.x + (dx/dist) * 150.0f;
+            m.b.pos.y = m.r.attache.y + (dy/dist) * 150.0f;
+        } else {
+            m.b.pos = {(float)mx, (float)my}; // sinon suit la souris
+        }
+
+        m.b.vit = {0,0}; // vitesse nulle pendant la visée
+
+    }
+    // === LANCEMENT ===
+    else if (m.etaitAppuye) { // si on vient de relâcher la souris
+        m.b.vit = {
+            (m.r.attache.x - m.b.pos.x) * 15.0f, // vitesse X (effet catapulte)
+            (m.r.attache.y - m.b.pos.y) * 15.0f  // vitesse Y
+        };
+        m.estLancee = true; // la balle est lancée
+    }
+
+    m.etaitAppuye = appuye; // mémorise l'état du clic
+
+    // === PHYSIQUE ===
+    if (!appuye) { // seulement si on ne vise pas
+
+        m.b.vit.y -= GRAVITE * DT; // applique la gravité
+
+        // effet ressort si pas encore lancé
+        if (!m.estLancee) {
+            m.b.vit.x += (m.r.attache.x - m.b.pos.x) * RAIDEUR_RAPPEL * DT;
+            m.b.vit.y += (m.r.attache.y - m.b.pos.y) * RAIDEUR_RAPPEL * DT;
+
+            m.b.vit.x *= AMORTI_RAPPEL;
+            m.b.vit.y *= AMORTI_RAPPEL;
+        }
+
+        // frottement de l'air
+        m.b.vit.x *= FRICTION_AIR;
+        m.b.vit.y *= FRICTION_AIR;
+
+        // mise à jour position
+        m.b.pos.x += m.b.vit.x * DT;
+        m.b.pos.y += m.b.vit.y * DT;
+
+        // collision avec le sol
+        if (m.b.pos.y < m.b.rayon) {
+            m.b.pos.y = m.b.rayon;
+            m.b.vit.y *= REBOND_SOL; // rebond vertical
+            m.b.vit.x *= FRICTION_SOL; // ralentissement horizontal
+        }
+
+        // arrêt si balle presque immobile au sol
+        if (m.estLancee && fabs(m.b.vit.x) < 15.0f && m.b.pos.y <= m.b.rayon + 5)
+            m.estLancee = false;
+    }
+
+    // === HISTORIQUE (graphiques) ===
+    m.alt_hist[m.hist_ptr] = m.b.pos.y; // enregistre hauteur
+    m.vit_hist[m.hist_ptr] = sqrt(m.b.vit.x*m.b.vit.x + m.b.vit.y*m.b.vit.y); // vitesse
+
+    if (m.vit_hist[m.hist_ptr] > m.vitMax)
+        m.vitMax = m.vit_hist[m.hist_ptr]; // met à jour vitesse max
+
+    m.hist_ptr = (m.hist_ptr + 1) % HIST_SIZE; // boucle dans le tableau
+
+    // === GESTION DES CIBLES ===
+    for (int i = 0; i < NB_CIBLES; i++) {
+        if (m.cibles[i].active) {
+
+            m.cibles[i].pos.x += m.cibles[i].vx * DT; // déplacement horizontal
+
+            // rebond sur les bords
+            if (m.cibles[i].pos.x < 350 || m.cibles[i].pos.x > GAME_ZONE - 30)
+                m.cibles[i].vx *= -1;
+
+            // collision balle-cible
+            float dx = m.b.pos.x - m.cibles[i].pos.x;
+            float dy = m.b.pos.y - m.cibles[i].pos.y;
+
+            if (dx*dx + dy*dy < pow(m.b.rayon + m.cibles[i].rayon, 2)) {
+                m.cibles[i].active = false; // détruite
+                m.score += 10; // ajoute points
+                creerExplosion(m, m.cibles[i].pos); // effet explosion
+            }
+        }
+    }
+
+    // === ASTEROÏDES ===
+    for (int i = 0; i < NB_ASTEROIDES; i++) {
+
+        Asteroide &a = m.asteroides[i]; // raccourci
+
+        if (!m.cibles[a.cibleProtegee].active) continue; // si cible morte → rien
+
+        a.angle += a.vitAngulaire * DT; // rotation
+
+        Vec2 centre = m.cibles[a.cibleProtegee].pos;
+
+        // position de l’astéroïde en orbite
+        float ax = centre.x + cos(a.angle) * a.rayonOrbite;
+        float ay = centre.y + sin(a.angle) * a.rayonOrbite;
+
+        // collision balle-astéroïde
+        float dx = m.b.pos.x - ax;
+        float dy = m.b.pos.y - ay;
+        float dist2 = dx*dx + dy*dy;
+
+        float rayonContact = m.b.rayon + a.rayon;
+
+        if (dist2 < rayonContact * rayonContact && dist2 > 0.001f) {
+
+            float dist = sqrt(dist2);
+
+            float nx = dx / dist; // normale X
+            float ny = dy / dist; // normale Y
+
+            // vitesse de l’astéroïde
+            float vAx = -sin(a.angle) * a.rayonOrbite * a.vitAngulaire;
+            float vAy =  cos(a.angle) * a.rayonOrbite * a.vitAngulaire;
+
+            // vitesse relative
+            float vRelX = m.b.vit.x - vAx;
+            float vRelY = m.b.vit.y - vAy;
+
+            float vRel_n = vRelX * nx + vRelY * ny;
+
+            if (vRel_n < 0) { // si collision vers l’intérieur
+                float e = 0.85f; // coefficient de rebond
+                float impulsion = -(1.0f + e) * vRel_n;
+
+                m.b.vit.x += impulsion * nx;
+                m.b.vit.y += impulsion * ny;
+            }
+
+            // corrige la pénétration
+            float overlap = rayonContact - dist;
+            m.b.pos.x += nx * overlap;
+            m.b.pos.y += ny * overlap;
+        }
+    }
+
+    // === TEMPS ET VICTOIRE ===
+    m.tempsActuel += DT; // temps qui passe
+
+    int ciblesRestantes = 0;
+
+    for (int i = 0; i < NB_CIBLES; i++)
+        if (m.cibles[i].active) ciblesRestantes++;
+
+    if (ciblesRestantes == 0 && !m.victoire) {
+        m.victoire = true; // victoire
+
+        if (m.meilleurTemps >= 999.0f || m.tempsActuel < m.meilleurTemps)
+            m.meilleurTemps = m.tempsActuel; // nouveau record temps
+    }
+
+    if (m.score > m.record)
+        m.record = m.score; // nouveau record score
+
+    // === PARTICULES (effets visuels) ===
+    for(int i = 0; i < MAX_PARTICULES; i++) {
+        if(m.particules[i].active) {
+
+            m.particules[i].vit.y -= (GRAVITE * 0.5f) * DT; // gravité réduite
+
+            m.particules[i].pos.x += m.particules[i].vit.x * DT;
+            m.particules[i].pos.y += m.particules[i].vit.y * DT;
+
+            m.particules[i].vie -= DT * 1.2f; // diminue la vie
+
+            if(m.particules[i].vie <= 0)
+                m.particules[i].active = false; // désactivation
+        }
+    }
+}
+void draw(Monde &m) {
+
+    winClear(); // efface la fenêtre
+
+    // === FOND ===
+    color(0, 0, 45); // couleur bleu foncé
+    rectangleFill(0, 0, GAME_ZONE, DIMY); // fond de la zone de jeu
+
+    // étoiles
+    for(int i = 0; i < NB_ETOILES; i++) {
+        color(255, 255, 255); // blanc
+        circleFill(m.fond_espace[i].pos.x, m.fond_espace[i].pos.y, m.fond_espace[i].taille);
+    }
+
+    // === LANCEUR ===
+    color(80, 80, 90);
+    rectangleFill(m.r.attache.x - 4, 0, m.r.attache.x + 4, m.r.attache.y); // support
+
+    color(120, 120, 130);
+    circleFill(m.r.attache.x, m.r.attache.y, 10); // base
+
+    // élastique
+    color(0, 150, 255);
+    line(m.r.attache.x, m.r.attache.y, m.b.pos.x, m.b.pos.y);
+
+    // balle
+    color(50, 255, 100);
+    circleFill(m.b.pos.x, m.b.pos.y, m.b.rayon);
+
+    // === VECTEURS (aide visuelle) ===
+    if (m.estLancee) {
+
+        float bx = m.b.pos.x;
+        float by = m.b.pos.y;
+
+        // direction verticale
+        color(255, 60, 60);
+        line(bx, by, bx, by - 40);
+
+        // direction vers le lanceur
+        float tx = m.r.attache.x - m.b.pos.x;
+        float ty = m.r.attache.y - m.b.pos.y;
+        float tnorm = sqrt(tx*tx + ty*ty);
+
+        if (tnorm > 0) {
+            color(0, 200, 255);
+            line(bx, by, bx + (tx/tnorm)*35, by + (ty/tnorm)*35);
+        }
+
+        // direction de la vitesse
+        float vn = sqrt(m.b.vit.x*m.b.vit.x + m.b.vit.y*m.b.vit.y);
+
+        if (vn > 1.0f) {
+            color(180, 255, 80);
+            line(bx, by, bx - (m.b.vit.x/vn)*30, by - (m.b.vit.y/vn)*30);
+        }
+    }
+
+    // === CIBLES ===
+    for (int i = 0; i < NB_CIBLES; i++) {
+        if (m.cibles[i].active) {
+            color(255, 180, 0);
+            circleFill(m.cibles[i].pos.x, m.cibles[i].pos.y, m.cibles[i].rayon);
+        }
+    }
+
+    // === ASTEROÏDES ===
+    for (int i = 0; i < NB_ASTEROIDES; i++) {
+
+        const Asteroide &a = m.asteroides[i];
+
+        if (!m.cibles[a.cibleProtegee].active) continue;
+
+        Vec2 centre = m.cibles[a.cibleProtegee].pos;
+
+        float ax = centre.x + cos(a.angle) * a.rayonOrbite;
+        float ay = centre.y + sin(a.angle) * a.rayonOrbite;
+
+        color(50, 50, 75);
+        circle(centre.x, centre.y, (int)a.rayonOrbite); // orbite
+
+        color(100, 85, 65);
+        circleFill(ax, ay, a.rayon); // astéroïde
+
+        // détails visuels
+        color(130, 110, 85);
+        circleFill(ax - a.rayon * 0.3f, ay + a.rayon * 0.2f, a.rayon * 0.5f);
+
+        color(75, 60, 45);
+        circleFill(ax + a.rayon * 0.35f, ay - a.rayon * 0.25f, a.rayon * 0.3f);
+
+        color(170, 140, 105);
+        circle(ax, ay, (int)a.rayon);
+    }
+
+    // === PARTICULES ===
+    for(int i = 0; i < MAX_PARTICULES; i++) {
+        if(m.particules[i].active) {
+            color(255, (int)(150 * m.particules[i].vie), 0);
+            circleFill(m.particules[i].pos.x, m.particules[i].pos.y, 2 * m.particules[i].vie);
+        }
+    }
+
+    // === TRAJECTOIRE PRÉVISIONNELLE ===
+    if (m.estLancee) {
+
+        Vec2 p_pos = m.b.pos;
+        Vec2 p_vit = m.b.vit;
+
+        for (int step = 0; step < 60; step++) {
+
+            // simulation physique
+            p_vit.y -= GRAVITE * DT;
+            p_vit.x *= FRICTION_AIR;
+            p_vit.y *= FRICTION_AIR;
+
+            p_pos.x += p_vit.x * DT;
+            p_pos.y += p_vit.y * DT;
+
+            if (p_pos.y < m.b.rayon) break;
+
+            int alpha = 255 - (step * 4);
+            if (alpha < 0) alpha = 0;
+
+            color(255, 255, 255, alpha);
+
+            if (step % 3 == 0)
+                circleFill(p_pos.x, p_pos.y, 2); // point de trajectoire
+        }
+    }
+
+    // === INTERFACE DROITE ===
+    color(15, 15, 20);
+    rectangleFill(GAME_ZONE, 0, DIMX, DIMY); //rectantge rempli
+
+    color(255, 255, 255);
+    print(10, DIMY - 20, "Temps (en s):");
+    print(130, DIMY - 20, (int)m.tempsActuel);
+
+    color(255, 255, 255);
+    print(UI_X, 550, "SCORE:");
+    print(UI_X + 80, 550, m.score);
+
+    color(255, 200, 0);
+    print(UI_X, 530, "V-MAX:");
+    print(UI_X + 80, 530, (int)m.vitMax);
+
+    color(100, 220, 255);
+    print(UI_X, 510, "TEMPS (en s):");
+    print(UI_X + 130, 510, (int)m.tempsActuel);
+
+    if (m.meilleurTemps < 999.0f) {
+        color(100, 255, 180);
+        print(UI_X, 490, "RECORD:");
+        print(UI_X + 80, 490, (int)m.meilleurTemps);
+    }
+
+    // === GRAPHIQUE ===
+    int G_Y = 200;
+    int G_H = 150;
+
+    color(30, 30, 35);
+    rectangleFill(UI_X, G_Y, UI_X + 200, G_Y + G_H);
+
+    color(100, 100, 100);
+    rectangle(UI_X, G_Y, UI_X + 200, G_Y + G_H);
+
+    for(int i = 0; i < HIST_SIZE - 1; i++) {
+
+        int i1 = (m.hist_ptr + i) % HIST_SIZE;
+        int i2 = (m.hist_ptr + i + 1) % HIST_SIZE;
+
+        float x1 = UI_X + (i * 200.0f / (HIST_SIZE - 1));
+        float x2 = UI_X + ((i + 1) * 200.0f / (HIST_SIZE - 1));
+
+        float h_alt1 = (m.alt_hist[i1] / (float)DIMY) * G_H;
+        if (h_alt1 > G_H) h_alt1 = G_H;
+
+        float h_alt2 = (m.alt_hist[i2] / (float)DIMY) * G_H;
+        if (h_alt2 > G_H) h_alt2 = G_H;
+
+        float h_vit1 = (m.vit_hist[i1] / VMAX_GRAPH) * G_H;
+        if (h_vit1 > G_H) h_vit1 = G_H;
+
+        float h_vit2 = (m.vit_hist[i2] / VMAX_GRAPH) * G_H;
+        if (h_vit2 > G_H) h_vit2 = G_H;
+
+        color(0, 255, 150); // altitude
+        line(x1, G_Y + h_alt1, x2, G_Y + h_alt2);
+
+        color(0, 150, 255); // vitesse
+        line(x1, G_Y + h_vit1, x2, G_Y + h_vit2);
+    }
+
+    // légende
+    int L_Y = G_Y + G_H + 20;
+
+    color(0, 255, 150);
+    line(UI_X, L_Y, UI_X + 15, L_Y);
+    color(200, 200, 200);
+    print(UI_X + 20, L_Y - 5, "Altitude");
+
+    color(0, 150, 255);
+    line(UI_X + 100, L_Y, UI_X + 115, L_Y);
+    color(200, 200, 200);
+    print(UI_X + 120, L_Y - 5, "Vitesse");
+
+    // === PHASE SPACE (vitesse vs altitude) ===
+    int P_X = UI_X;
+    int P_Y = 20;
+    int P_W = 200;
+    int P_H = 150;
+
+    float vitesse_balle = sqrt(m.b.vit.x*m.b.vit.x + m.b.vit.y*m.b.vit.y);
+
+    color(30, 30, 35);
+    rectangleFill(P_X, P_Y, P_X + P_W, P_Y + P_H);
+
+    color(100, 100, 100);
+    rectangle(P_X, P_Y, P_X + P_W, P_Y + P_H);
+
+    color(60, 60, 60);
+    line(P_X, P_Y + P_H/2, P_X + P_W, P_Y + P_H/2);
+    line(P_X + P_W/2, P_Y, P_X + P_W/2, P_Y + P_H);
+
+    float px = P_X + (vitesse_balle / VMAX_GRAPH) * P_W;
+    float py = P_Y + (m.b.pos.y / (float)DIMY) * P_H;
+
+    // limites
+    if (px < P_X) px = P_X;
+    if (px > P_X + P_W) px = P_X + P_W;
+    if (py < P_Y) py = P_Y;
+    if (py > P_Y + P_H) py = P_Y + P_H;
+
+    color(255, 80, 200);
+    circleFill(px, py, 3);
+
+    color(150, 150, 150);
+    print(P_X, P_Y + P_H + 4, "Phase : vit/alt");
+
+    // === ÉCRAN DE VICTOIRE ===
+    if (m.victoire) {
+
+        color(0, 0, 0, 180);
+        rectangleFill(150, 200, 550, 420);
+
+        color(255, 220, 0);
+        rectangle(150, 200, 550, 420);
+
+        color(255, 220, 0);
+        print(230, 370, "*** VICTOIRE ! ***");
+
+        color(255, 255, 255);
+        print(190, 340, "Score  :");
+        print(330, 340, m.score);
+
+        print(190, 315, "Record :");
+        print(330, 315, m.record);
+
+        color(100, 220, 255);
+        print(190, 290, "Temps (s) :");
+        print(330, 290, m.tempsActuel);
+
+        if (m.meilleurTemps < 999.0f) {
+            color(100, 255, 180);
+            print(190, 265, "Meill.(s):");
+            print(330, 265, m.meilleurTemps);
+        }
+
+        // bouton rejouer
+        int bx1 = 230, by1 = 230, bx2 = 470, by2 = 270;
+
+        int mx, my;
+        mousePos(mx, my);
+
+        bool survol = (mx >= bx1 && mx <= bx2 && my >= by1 && my <= by2);
+
+        color(survol ? 80 : 40, survol ? 180 : 120, survol ? 80 : 40);
+        rectangleFill(bx1, by1, bx2, by2);
+
+        color(200, 255, 200);
+        rectangle(bx1, by1, bx2, by2);
+
+        print(bx1 + 60, by1 + 10, "REJOUER");
+
+        if (survol && isMousePressed(SDL_BUTTON_LEFT)) {
+
+            int recordSauvegarde = m.record;
+            float meilleurTempsSauvegarde = m.meilleurTemps;
+
+            init(m); // reset du jeu
+
+            m.record = recordSauvegarde;
+            m.meilleurTemps = meilleurTempsSauvegarde;
+        }
+    }
+}
+int main(int , char** ) {
+
+    Monde m; // création du monde (toutes les données du jeu)
+
+    winInit("PhysiBall : Realistic Support", DIMX, DIMY);
+    // initialise la fenêtre graphique avec un titre + dimensions
+
+    init(m); // initialise toutes les valeurs du jeu (balle, cibles, etc.)
+
+    m.record = 0; // score record initialisé à 0
+    m.meilleurTemps = 999.0f; // valeur très grande pour dire "pas encore de record"
+
+    // boucle principale du jeu (tourne tant que la fenêtre est ouverte)
+    while (!winDisplay()) {
+
+        update(m); // met à jour la logique du jeu (physique, collisions, etc.)
+        draw(m);   // affiche tout à l'écran (graphismes)
+    }
+
+    winQuit(); // ferme proprement la fenêtre graphique
+
+    return 0; // fin du programme (tout s'est bien passé)
+}
